@@ -201,13 +201,23 @@ def extract_targets(events):
 
 
 def extract_designations(events):
-    """Extract object designations from FITS filenames in the log."""
-    desig_re = re.compile(r'_4A_([A-Za-z0-9]+)_\d+_\d+\.')
+    """Extract object designations from FITS filenames in the log.
+
+    CSS filenames follow: SITE_DATE_CONFIG_DESIG_NN_NNNN pattern.
+    The designation field is the 4th underscore-delimited component,
+    after site code, date, and camera config. Tolerant of varying
+    site codes (703, G96, I52, V06, V00, KP21M, etc.) and configs
+    (1A, 2B, 4A, 1C, 2C, 2A, etc.).
+    """
+    # Match: SITE_YYYYMMDD_CONFIG_DESIGNATION_NN_NNNN
+    desig_re = re.compile(
+        r'(?:^|/)(?:[A-Z0-9]{2,5})_(\d{8})_([A-Za-z0-9]+)_([A-Za-z0-9]+)_(\d+)_(\d+)'
+    )
     designations = Counter()
     for ev in events:
         m = desig_re.search(ev.line)
         if m:
-            designations[m.group(1)] += 1
+            designations[m.group(3)] += 1
     return designations
 
 
