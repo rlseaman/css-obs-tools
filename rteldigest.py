@@ -99,10 +99,14 @@ def parse_done_point(response):
 def parse_done_where(response):
     """Parse 'done where ra=... dec=... ha=... alt=... az=...'."""
     result = {}
-    for key in ('ra', 'dec', 'name', 'mode', 'type'):
+    for key in ('ra', 'dec', 'name', 'mode'):
         m = re.search(rf'{key}=([^\s]+)', response)
         if m:
             result[key] = m.group(1)
+    # 'type=' in where response means encoder type (abs/inc), not event type
+    m = re.search(r'type=([^\s]+)', response)
+    if m:
+        result['encoder_type'] = m.group(1)
     for key in ('ha', 'secz', 'alt', 'az'):
         m = re.search(rf'{key}=([-\d.]+)', response)
         if m:
@@ -119,7 +123,7 @@ def parse_done_encoder(response):
             result[key] = float(m.group(1))
     m = re.search(r'type=(\w+)', response)
     if m:
-        result['type'] = m.group(1)
+        result['encoder_type'] = m.group(1)
     return result
 
 
