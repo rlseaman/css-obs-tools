@@ -191,11 +191,107 @@ of the pointing model and drive system, not a transient condition.
 | Slew rate model | 0.55 deg/s + 8s | 0.55 deg/s + 8s |
 | Dither pattern | 0.5-1.2° offsets | Sub-arcsecond offsets |
 
-**Conclusion:** The telescope's slew and pointing performance was
-stable from June 2023 through April 2024 — the last active period
-before the runaway incident. The drive system was mechanically
-reliable when the encoder power supply was intact. The bimodal
-pointing residual is a persistent feature that a refreshed pointing
-model should address. The different dither patterns between the two
-periods reflect different observing strategies, not different
-telescope performance.
+**Conclusion:** The telescope's slew rate and pointing *accuracy*
+were stable from June 2023 through April 2024. However, pointing
+*convergence* degraded significantly — see below.
+
+---
+
+## October 2023: intermediate comparison
+
+Three nights from the last consistent observing month.
+
+| Date | Slews | Notes |
+|------|-------|-------|
+| 2023-10-03 | 24 | |
+| 2023-10-04 | 27 | |
+| 2023-10-13 | 28 | |
+| **Total** | **79** | |
+
+### Slew + settle time (0–90°)
+
+![Settling time, October 2023](oct2023_settling_0_90deg.png)
+
+Consistent with June 2023. The 0.55 deg/s + 8s model fits well.
+
+### Small slew overhead (0–2°)
+
+![Settling time, 0-2 degrees, October 2023](oct2023_settling_0_2deg.png)
+
+Very few small slews — mostly zero-distance re-points plus one
+real 0.6° move at 12s. The observing pattern is target-to-target
+without dithering.
+
+### Pointing residual distribution
+
+![Pointing residual, October 2023](oct2023_pointing_residual.png)
+
+Median 4.0", mean 5.8" — slightly tighter than the other periods.
+The bimodal tail is present but less prominent with this smaller
+sample.
+
+---
+
+## Near-zero slews in April 2024
+
+![Near-zero slews, April 2024](apr2024_settling_nearzero.png)
+
+78 slews within 0.05° (180 arcsec): these are re-points where the
+telescope was already at the target. The point command returns
+immediately when the residual is below `maxdiff` (0.010°). Most
+complete in 0 seconds; a few at 1 second reflect the timestamp
+quantization. The scatter from 0" to 36" represents the natural
+spread of "already there" positions.
+
+---
+
+## Convergence degradation: the hidden signal
+
+The most significant finding from comparing the three periods is
+not in the residuals or slew rates, but in the **multi-pass
+convergence rate** — the fraction of slews requiring more than one
+iteration of the pointing loop to reach the target:
+
+| Period | Total | Multi-pass | Rate | Notes |
+|--------|-------|-----------|------|-------|
+| Jun 2023 | 95 | 5 | **5%** | Excellent |
+| Oct 2023 | 79 | 9 | **11%** | Good |
+| Apr 2024 | 491 | 170 | **35%** | Degraded |
+
+A 7× increase in multi-pass convergence from June 2023 to April
+2024 represents genuine degradation in the drive system's ability
+to settle on target in a single attempt. The final pointing accuracy
+is comparable (both achieve ~4" median), but the *path to
+convergence* became significantly rougher.
+
+Possible causes:
+- **Grease stiction worsening** — McKenna noted the grease was
+  "beyond service" in March 2023. By April 2024, 13 months later
+  (more than double the 6-month service life), viscosity and
+  contamination would be substantially worse.
+- **Encoder degradation** — the encoder power supply that failed
+  catastrophically on April 28 may have been intermittently
+  degrading before complete failure, producing occasional bad
+  position readings that required re-convergence.
+- **Servo tuning drift** — the PMAC gain parameters may have
+  drifted or become less optimal as mechanical conditions changed.
+
+This is a **precursor signal** — the telescope was struggling before
+it failed. The lesson for CSS operations: multi-pass convergence
+rate should be monitored as a health metric. A rising rate indicates
+mechanical or encoder issues before they become catastrophic.
+
+---
+
+## Three-period comparison summary
+
+| Metric | Jun 2023 | Oct 2023 | Apr 2024 |
+|--------|----------|----------|----------|
+| Nights | 3 | 3 | 3 |
+| Total slews | 665 | 79 | 491 |
+| Median residual | 3.6" | 4.0" | 4.0" |
+| Mean residual | 6.5" | 5.8" | 7.3" |
+| Slew rate model | 0.55+8s | 0.55+8s | 0.55+8s |
+| Multi-pass rate | 5% | 11% | **35%** |
+| Dither pattern | 0.5-1.2° | target-to-target | sub-arcsec |
+| Days before runaway | 323 | 207 | 11-17 |
