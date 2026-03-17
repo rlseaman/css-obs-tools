@@ -6,3 +6,7 @@ __pycache__/
 *.swo
 *~
 scratch/
+
+# Local working documents (not for publication)
+reports/kp21m-slew-performance-jun2023.md
+reports/convergence_trend.png
