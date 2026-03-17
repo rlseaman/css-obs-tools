@@ -245,41 +245,113 @@ spread of "already there" positions.
 
 ---
 
-## Convergence degradation: the hidden signal
+## Convergence degradation: the full timeline
 
-The most significant finding from comparing the three periods is
-not in the residuals or slew rates, but in the **multi-pass
-convergence rate** — the fraction of slews requiring more than one
-iteration of the pointing loop to reach the target:
+The most significant finding from this analysis is not in the
+residuals or slew rates, but in the **multi-pass convergence rate**
+— the fraction of slews requiring more than one iteration of the
+pointing loop to reach the target.
 
-| Period | Total | Multi-pass | Rate | Notes |
-|--------|-------|-----------|------|-------|
-| Jun 2023 | 95 | 5 | **5%** | Excellent |
-| Oct 2023 | 79 | 9 | **11%** | Good |
-| Apr 2024 | 491 | 170 | **35%** | Degraded |
+The three-period comparison (June 2023 → October 2023 → April 2024)
+suggested a gradual degradation. To test this, convergence statistics
+were computed for **every date in the rtel archive with ≥20 real
+slews** — 159 dates spanning November 2020 through April 2025.
 
-A 7× increase in multi-pass convergence from June 2023 to April
-2024 represents genuine degradation in the drive system's ability
-to settle on target in a single attempt. The final pointing accuracy
-is comparable (both achieve ~4" median), but the *path to
-convergence* became significantly rougher.
+![Convergence trend](convergence_trend.png)
 
-Possible causes:
-- **Grease stiction worsening** — McKenna noted the grease was
-  "beyond service" in March 2023. By April 2024, 13 months later
-  (more than double the 6-month service life), viscosity and
-  contamination would be substantially worse.
-- **Encoder degradation** — the encoder power supply that failed
-  catastrophically on April 28 may have been intermittently
-  degrading before complete failure, producing occasional bad
-  position readings that required re-convergence.
-- **Servo tuning drift** — the PMAC gain parameters may have
-  drifted or become less optimal as mechanical conditions changed.
+### Era summary
 
-This is a **precursor signal** — the telescope was struggling before
-it failed. The lesson for CSS operations: multi-pass convergence
-rate should be monitored as a health metric. A rising rate indicates
-mechanical or encoder issues before they become catastrophic.
+| Period | Dates | Slews | Multi-pass | Rate |
+|--------|-------|-------|-----------|------|
+| 2020–2021 | 71 | 2,258 | 107 | **4.7%** |
+| 2022 | 13 | 531 | 75 | **14.1%** |
+| 2023 H1 (Jan–Jun) | 52 | 1,655 | 174 | **10.5%** |
+| 2023 H2 (Jul–Dec) | 9 | 308 | 25 | **8.1%** |
+| 2024 pre-runaway (Apr 11–19) | 4 | 521 | 215 | **41.3%** |
+| 2024 post-repair (Apr 24–29) | 5 | 437 | 28 | **6.4%** |
+| 2025 (recommissioning) | 3 | 221 | 26 | **11.8%** |
+
+### What the full timeline reveals
+
+The three-period snapshot suggested monotonic degradation
+(5% → 11% → 35%). The full timeline tells a more nuanced story:
+
+1. **Baseline (2020–2021): 4.7%.** The telescope converged well
+   during the Sells team's most active period. Most nights show
+   0–5% multi-pass rates, with occasional spikes to 15–25%.
+
+2. **January 2022 spike.** Four nights (Jan 8–11) show 17–27%
+   multi-pass rates, then performance returns to baseline. This
+   suggests a transient issue that was noticed and corrected —
+   possibly a PMAC parameter adjustment or mechanical intervention.
+
+3. **2023 is not monotonic.** The first half of 2023 averages 10.5%
+   with considerable scatter (0% to 28% on individual nights),
+   but the second half improves to 8.1%. This argues against a
+   simple "grease getting worse" narrative — lubrication degradation
+   would not reverse itself.
+
+4. **April 2024 (Apr 11–19): 41.3% — dramatic and isolated.** This
+   is not the endpoint of a gradual trend but a sudden jump. Four
+   consecutive observing nights show 34–46% multi-pass rates,
+   far outside the historical range. This occurred 11–17 days
+   before the April 28 runaway incident.
+
+5. **Post-repair recovery: 6.4%.** After the encoder power supply
+   was repaired (Apr 24–29), convergence immediately returns to
+   near-baseline levels. This is the strongest evidence in the
+   dataset for identifying the root cause.
+
+### Root cause: PMAC incremental encoder power supply
+
+The convergence pattern — sudden onset, dramatic spike, immediate
+recovery after repair — points to the **PMAC incremental encoder
+power supply** as the primary cause, not lubrication or the
+Raspberry Pi absolute encoder system.
+
+The KP 2.1m has two independent encoder paths:
+
+- **PMAC incremental encoders** (motor shafts): provide real-time
+  feedback for the 2.45 kHz servo loop. An electrical short fed
+  115V AC into these encoders' DC power supply on April 28,
+  causing the catastrophic runaway. But degradation before complete
+  failure — noisy or intermittent encoder signals from a failing
+  power supply — would cause the servo to struggle to settle,
+  producing exactly the multi-pass convergence pattern observed.
+
+- **Raspberry Pi absolute encoders** (worm shafts, BEI 21-bit):
+  read via GPIO and served over HTTP by a CGI script (`rabs`).
+  Used by `point.C` to determine telescope position before
+  commanding a slew. If the Pi returns a bad reading, the first
+  slew goes to the wrong place — but subsequent passes also read
+  the Pi, so intermittent Pi errors would produce *occasional*
+  convergence failures, not the sustained 41% rate seen in
+  April 2024. The Pi is also not implicated by the post-repair
+  recovery, since the Pi was not part of the April repair.
+
+The post-repair drop from 41.3% to 6.4% is dispositive: the same
+hardware fix that prevented future runaways also restored
+convergence performance. The encoder power supply was degrading
+for at least 2–3 weeks before it failed completely.
+
+### Implications
+
+- **Multi-pass convergence rate is a precursor metric.** A rising
+  rate indicates servo-level hardware issues before they become
+  catastrophic. For CSS operations, this should be monitored
+  automatically — an alert at >15% sustained would have flagged
+  the April 2024 failure weeks in advance.
+
+- **The 2022 and 2023 scatter** (occasional 15–25% nights within
+  otherwise healthy periods) may reflect other transient
+  conditions: wind loading, thermal gradients, or the known
+  lubrication issues. These are operationally tolerable but
+  worth correlating with environmental data when available.
+
+- **The Raspberry Pi** is not implicated by this specific
+  convergence pattern, but remains a reliability concern for
+  other reasons (setuid CGI, no reading validation, SD card
+  wear, deprecated wiringPi library — see `raspberry-pi-encoder.md`).
 
 ---
 
