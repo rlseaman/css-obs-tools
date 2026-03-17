@@ -131,3 +131,71 @@ path fix).
 5. **Night-to-night consistency is good.** The three June 2023
    sessions show reproducible performance, suggesting the drive
    system is mechanically stable when properly maintained.
+
+---
+
+## Comparison: April 2024 (pre-runaway)
+
+To check whether performance was stable through the telescope's
+final active period, the same analysis was repeated for three
+productive nights in April 2024 — just 11-17 days before the
+April 28 runaway incident (encoder power supply failure).
+
+| Date | Slews | Notes |
+|------|-------|-------|
+| 2024-04-11 | 180 | Full session |
+| 2024-04-16 | 141 | Full session |
+| 2024-04-17 | 170 | Full session |
+| **Total** | **491** | |
+
+### Slew + settle time (0–90°)
+
+![Settling time, 0-90 degrees, April 2024](apr2024_settling_0_90deg.png)
+
+Performance is consistent with June 2023. The 0.55 deg/s + 8s
+reference line still fits well. Most large slews cluster around
+17-20° (a preferred target spacing) and 55-75° (cross-sky moves).
+No degradation visible in the 10 months between these datasets.
+
+### Small slew overhead (0–2°)
+
+![Settling time, 0-2 degrees, April 2024](apr2024_settling_0_2deg.png)
+
+The April 2024 observing pattern is markedly different from June
+2023: almost all small moves are near zero distance (sub-arcsecond
+offsets) with 0-1s elapsed time. The degree-scale dithers seen in
+June 2023 are largely absent. This suggests the previous team was
+using a different observing strategy — possibly larger fields with
+single pointings rather than multi-position dithers, or an
+autoguider-based acquisition sequence that produces very small
+corrections rather than deliberate offsets.
+
+### Pointing residual distribution
+
+![Pointing residual, April 2024](apr2024_pointing_residual.png)
+
+The residual distribution is very similar to June 2023: median
+4.0", mean 7.3". The bimodal structure persists, with the same
+secondary population at 15-35". The consistency across 10 months
+and different sky coverage confirms this is a systematic feature
+of the pointing model and drive system, not a transient condition.
+
+### June 2023 vs. April 2024: summary
+
+| Metric | Jun 2023 | Apr 2024 |
+|--------|----------|----------|
+| Nights | 3 | 3 |
+| Total slews | 665 | 491 |
+| Median residual | 3.6" | 4.0" |
+| Mean residual | 6.5" | 7.3" |
+| Slew rate model | 0.55 deg/s + 8s | 0.55 deg/s + 8s |
+| Dither pattern | 0.5-1.2° offsets | Sub-arcsecond offsets |
+
+**Conclusion:** The telescope's slew and pointing performance was
+stable from June 2023 through April 2024 — the last active period
+before the runaway incident. The drive system was mechanically
+reliable when the encoder power supply was intact. The bimodal
+pointing residual is a persistent feature that a refreshed pointing
+model should address. The different dither patterns between the two
+periods reflect different observing strategies, not different
+telescope performance.
