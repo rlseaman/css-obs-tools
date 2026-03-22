@@ -86,17 +86,65 @@ Slew performance
   Different event types coexist; load with `pd.read_json(lines=True)`
 - CSV (`--csv --type point`) — flat table for a single event type
 
+### wamo
+
+Query the Minor Planet Center's WAMO service for the processing status
+of CSS astrometric submissions.  Reads `.neos` or `.mpcd` designation
+files from the nightly data directory and reports per-object status.
+
+```bash
+cd /data0/26Mar22
+wamo                           # default: batch query, auto Scout alerts
+wamo --scout                   # show JPL Scout data for all NEOCP objects
+wamo --noscout                 # suppress Scout lookups
+wamo --nobatch                 # sequential streaming output
+wamo -m                        # sample from mpcd (incidental MBA) files
+wamo -v                        # verbose: raw MPC responses
+wamo -q                        # quiet: suppress stderr messages
+```
+
+**Key features:**
+- Handles all known MPC response formats (obs80, trkSub, explicit)
+- Batch queries via MPC JSON API (default, ~12x faster than sequential)
+- JPL Scout alerts for NEOCP objects (impact, PHA, close approach)
+- Survey/follow-up annotation (`svy`, `fup`, `s+f`) from CSS filenames
+- Multi-date annotation when MPC response includes prior-night observations
+- Silent JSONL logging to `~/.wamo/` for post-hoc analysis
+- Auto-detects tonight's data directory if not run from one
+
+**Example output:**
+```
+svy CEF3A92 has been queued to neo/new/incoming (new NEOCP or PCCP objects)
+svy CEF4A62 is not a minor planet
+s+f C1D0Q15 is on the NEOCP
+    Scout: Imp 0 NEO 76% PHA 14%
+           12obs 1.57d arc V=23.1 H=21.4 moid=0.1au rate=1.2"/hr
+fup C1CX3P5 was published in MPEC 2026-F101 as 2026 FH2 [also 2026 03 18]
+```
+
+See `wamo-status.md` for complete documentation including all MPC
+response formats, processing queues, and architecture details.
+
 ## Installation
 
-No installation needed — these are standalone scripts requiring only
-Python 3.6+.
+No installation needed — these are standalone scripts.  `logdigest`,
+`rteldigest`, and `tcsplot` require Python 3.6+.  `wamo` requires
+`tclsh` and `curl` (standard on RHEL 8).
 
 ```bash
 # Option 1: run directly
 python3 logdigest.py <logfile>
+tclsh wamo
 
 # Option 2: symlink into PATH
 ln -s $(pwd)/logdigest.py ~/bin/logdigest
+ln -s $(pwd)/wamo ~/bin/wamo
+```
+
+## Testing
+
+```bash
+tclsh wamo-test.tcl            # offline test suite for wamo parser
 ```
 
 ## Adding new classification patterns
@@ -112,10 +160,12 @@ Order matters — first match wins. Place specific patterns before general ones.
 
 ## Sites
 
-| Code | Telescope | Location |
-|------|-----------|----------|
-| 703 | Catalina Schmidt 0.7m | Mt. Bigelow |
-| G96 | Mt. Lemmon 1.5m | Mt. Lemmon |
-| I52 | Steward/Bok 2.3m | Kitt Peak |
-| V06 | Kuiper 1.54m | Mt. Bigelow |
-| KP21M | KPNO 2.1m | Kitt Peak |
+| Code | Telescope | Role | Location |
+|------|-----------|------|----------|
+| 703 | Catalina Schmidt 0.7m | Survey | Mt. Bigelow |
+| G96 | Mt. Lemmon 1.5m | Survey | Mt. Lemmon |
+| V00 | Steward/Bok 2.3m | Survey | Kitt Peak |
+| I52 | Mt. Lemmon 1.0m | Follow-up | Mt. Lemmon |
+| V06 | Kuiper 1.54m | Follow-up | Mt. Bigelow |
+| G84 | Schulman 0.8m | Follow-up | Mt. Lemmon |
+| KP21M | KPNO 2.1m | — | Kitt Peak |

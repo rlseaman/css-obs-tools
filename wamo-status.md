@@ -79,6 +79,27 @@ The `-m` (mpcd sampling) mode uses sequential queries because mpcd
 objects are known/numbered asteroids whose batch responses are
 particularly difficult to split reliably.
 
+### Cross-date status visibility
+
+The original script only extracted status keywords from obs80 lines
+matching the target UT date.  When MPC's response contained observations
+from prior nights (common for follow-up telescopes and objects that have
+been identified with provisional designations), the status was invisible.
+
+**Fix**: status keywords are now extracted from ALL obs80 lines in the
+response.  The date filter is retained only for the `[also ...]`
+annotation.  This means an observer at I52 querying a designation that
+was published based on prior-night observations will see "was published"
+instead of "no MPC response."
+
+### Status priority: published > pending
+
+When MPC's response includes both published (prior night) and pending
+(tonight) observations of the same designation, `published` takes
+priority.  The observer needs to know the object has been published —
+that's the actionable information for deciding whether to continue
+observing it.
+
 ### Three-way not-found distinction
 
 | Output | Meaning |
@@ -213,6 +234,47 @@ All five active CSS telescopes tested during live observing:
 - **I52** (follow-up, 32 desigs): 22 NEOCP, 4 published, 3 `neo/newid`, 1 near-duplicate
 - **V06** (follow-up, 8 desigs): 3 NEOCP, 5 published
 
+## Test Suite
+
+`wamo-test.tcl` — 22 offline tests covering all observed MPC response
+formats.  Extracts the `trackstat` proc from `wamo` and tests it in
+isolation with captured raw MPC responses.  No network access required.
+
+```bash
+tclsh wamo-test.tcl
+```
+
+Test categories:
+- trkSub statuses (12): not-minor-planet, deleted, artificial,
+  near-duplicate, not-processed, 7 queue types
+- obs80 statuses (5): NEOCP, published, pending, ITF, cross-date
+- Priority/multi-date (2): published+pending, cross-date published
+- Explicit MPC responses (2): not-found, invalid identifier
+- Empty response (1): no MPC response
+
+MPC's database status flags map to wamo output as:
+- `P` (published) → "was published"
+- `p` (pending) → "is pending publication"
+- `I` (ITF) → "is in the ITF"
+
+## Field Test Results — 2026-03-22 (Second Night)
+
+Automated 10-minute polling at 703, G96, I52, V00.
+
+Notable findings:
+- **Pipeline transit captured**: `neo/new/incoming` → NEOCP in ~10 min
+  (C463MW1 at 703, multiple objects at V00)
+- **MBA reclassification**: `neo/new/incoming` → `mba/mopp` → pending
+  → published (C1D2L35 at I52, C1DAXW5 at V00)
+- **"received but not processed"**: first live capture of this
+  transient state (CEFEQ52 at I52), resolved to NEOCP in 10 min
+- **Comet recovery**: C463L41 at 703 showed "was not found by MPC"
+  for 8 hours before being identified as a known numbered comet
+  (`cmt/pct` queue)
+- **Cross-date fix validated**: C1D0QJ5 at I52 now correctly shows
+  "was published" for observations from prior nights
+- **New queue `mba/newid`**: MBA precoveries (K22K29K at V00)
+
 ## Architecture
 
 - **Language**: Tcl — standard on RHEL 8.6, no dependencies beyond
@@ -223,6 +285,8 @@ All five active CSS telescopes tested during live observing:
 - **Sequential**: old API primary, new API fallback. Streaming output.
 - **Timeouts**: `--timeout N` (default 15s connect, 30s max)
 - **Sort order**: alphabetical by designation (`lsort -dictionary`)
+- **Directory auto-detection**: if CWD lacks data files, tries
+  `/data0/YYMmmDD` using tonight's UT date (rollover at 17:00 UT)
 
 ## CSS Context
 
