@@ -277,6 +277,7 @@ proc whazzit { instr } {
     if {[string equal $instr "mba/mopp"] }         { return "unnumbered MBAs" }
     if {[string equal $instr "mba/num"] }          { return "numbered MBAs" }
     if {[string equal $instr "mba/new"] }          { return "possible new MBAs to be designated" }
+    if {[string equal $instr "mba/newid"] }        { return "MBA (p)recoveries" }
     if {[string equal $instr "newcode"] }          { return "observations awaiting a program code to be assigned" }
     if {[string equal $instr "tno/unn"] }          { return "unnumbered one-opposition TNOs" }
     if {[string equal $instr "tno/mopp"] }         { return "unnumbered multi-opposition TNOs" }
@@ -392,25 +393,20 @@ proc trackstat { desig mpcstat } {
 	}
 
 	set obsdate($idx) [string range $line 15 24]
-	if {$obsdate($idx) != $utdate} {
+	set is_tonight [expr {$obsdate($idx) == $utdate}]
+
+	if {!$is_tonight} {
 	    # Collect other dates for multi-night annotation
 	    if {![info exists seen_dates($obsdate($idx))]} {
 		set seen_dates($obsdate($idx)) 1
 	    }
-	    continue
 	}
 
 	set col80($idx) [string range $line 0 79]
-	    # set mess($idx)  [string range $line 81 end]
-	    # set tmpstr [string map [list "\'" {} ] $mess($idx)]
-	    # puts $mess($idx)
-	    # puts $tmpstr
 
 	set mess($idx) [string map [list "\'" {} ] [string range $line 81 end] ]
 
-	    # puts $line
-	    # puts $mess($idx)
-
+	# Extract status from ALL obs80 lines, not just tonight's
 	if {[string first "processed" $mess($idx)] > 0} { incr ar_unprocessed($idx) }
 	if {[string first "NEOCP" $mess($idx)] > 0}     { incr ar_neocp($idx) }
 	if {[string first "pending" $mess($idx)] > 0}   { incr ar_pending($idx) }
@@ -530,9 +526,7 @@ proc trackstat { desig mpcstat } {
     set got_response [expr {$trksub_count > 0 || $nobs > 0}]
     set got_unknown  [expr {$trksub_unknown > 0}]
 
-    if {$multi > 1} {
-        return "has multiple tracklets?"
-    } elseif {$deleted == $nobs && $nobs > 0} {
+    if {$deleted == $nobs && $nobs > 0} {
         return "was deleted"
     } elseif {$some == 0 && ($got_response || $got_unknown)} {
         return "has unrecognized MPC status (see log)"
@@ -548,10 +542,10 @@ proc trackstat { desig mpcstat } {
         return "has been received, but not processed"
     } elseif {$neocp} {
         return "is on the NEOCP"
-    } elseif {$pending} {
-        return "is pending publication"
     } elseif {$published} {
         return "was published"
+    } elseif {$pending} {
+        return "is pending publication"
     } elseif {$notminor} {
         return "is not a minor planet"
     } elseif {$artificial} {
