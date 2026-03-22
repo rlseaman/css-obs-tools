@@ -10,11 +10,9 @@ visualize CSS observing data. Tools should work across all CSS sites
 
 ## Current tools
 
-- **logdigest.py** — Distill CSS control.tcl nightly logs into structured summaries
-- **rteldigest.py** — Parse KP 2.1m rtel (BAIT protocol) logs into event streams
-- **tcsplot.py** — Plot telescope performance from rteldigest JSONL output
-- **wamo** — Query MPC WAMO for astrometry processing status, with JPL Scout integration
-- **wamo-test.tcl** — Offline test suite for wamo parser (22 tests)
+- **logdigest/** — Distill CSS control.tcl nightly logs into structured summaries
+- **rteldigest/** — Parse KP 2.1m rtel logs and plot telescope performance (rteldigest, tcsplot)
+- **wamo/** — Query MPC WAMO for astrometry processing status, with JPL Scout integration
 
 ## Conventions
 
@@ -27,9 +25,7 @@ visualize CSS observing data. Tools should work across all CSS sites
 
 ## Directory layout
 
+- `logdigest/` — log digest tool and reports
+- `rteldigest/` — rtel digest, tcsplot, and analysis plots
+- `wamo/` — WAMO status checker, test suite, and docs
 - `scratch/` — local working area, gitignored
-- `reports/` — analysis output (plots, markdown); some gitignored
-- `wamo-logs/` — captured wamo log files for analysis, gitignored
-- `wamo-status.md` — detailed wamo documentation and field test results
-- Top-level `*.py` — Python tools
-- `wamo` — Tcl script, deployable to telescope computers
