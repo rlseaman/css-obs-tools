@@ -1,0 +1,1141 @@
+#!/usr/bin/tclsh
+
+# query MPC WAMO
+# wamo with no arguments reads new format neos files (after 15Dec18)
+#
+# R. Seaman, 20Oct04
+
+global utdate mpec permID provID notfound
+global unprocessed pending published
+global neocp notminor itf rejected deleted queued
+global artificial
+global desig_obstype desig_obscount
+global other_dates
+
+set curl_timeout 15
+set curl_keepalive 0
+set batch_mode 1
+set scout_mode "auto"
+
+proc RunCommand { cmd } {
+    catch { eval exec -ignorestderr $cmd } result options
+    return $result
+}
+
+# Build curl option string from global settings
+proc curl_opts {} {
+    global curl_timeout curl_keepalive
+    set opts "-s -k --connect-timeout $curl_timeout --max-time [expr {$curl_timeout * 2}]"
+    if {$curl_keepalive} { append opts " --keepalive-time 30" }
+    return $opts
+}
+
+# Query WAMO: try primary endpoint, fall back to new API if primary returns empty
+proc wamo_query { desig site } {
+    set opts [curl_opts]
+    set cmd_primary [format "curl %s -d \"obs=%s %s\" \"https://minorplanetcenter.net//cgi-bin/cgipy/wamo2\" 2> /dev/null" $opts $desig $site]
+    set cmd_fallback [format "curl %s -X GET -H \"Content-type: application/json\" \"https://data.minorplanetcenter.net/api/wamo\" -d \'\[\"string\", \"%s %s\"\]\' 2> /dev/null" $opts $desig $site]
+
+    catch { RunCommand $cmd_primary } result
+    if {[string length [string trim $result]] > 0} {
+	return $result
+    }
+
+    catch { RunCommand $cmd_fallback } result
+    return $result
+}
+
+# Batch query: send all designations in one JSON API call,
+# return dict of desig -> string-format response (same as sequential).
+# Uses the JSON response mode which keys results by query string,
+# avoiding the unreliable block-splitting of the string mode.
+proc wamo_batch { desig_list site } {
+    set opts [curl_opts]
+
+    # Build JSON array: ["desig1 site", "desig2 site", ...]
+    set json_parts {}
+    foreach d $desig_list {
+	lappend json_parts [format {"%s %s"} $d $site]
+    }
+    set json_body [format {[%s]} [join $json_parts ", "]]
+
+    # Write JSON to temp file to avoid shell quoting issues
+    set tmpfile [file join /tmp "wamo-batch-[pid].json"]
+    set fd [open $tmpfile w]
+    puts -nonewline $fd $json_body
+    close $fd
+
+    set cmd [format "curl %s -X GET -H \"Accept: application/json\" -H \"Content-type: application/json\" \"https://data.minorplanetcenter.net/api/wamo\" -d @%s 2> /dev/null" $opts $tmpfile]
+    catch { RunCommand $cmd } raw_json
+    catch { file delete $tmpfile }
+
+    # Parse JSON response: {"found": [...], "not_found": [...], "malformed": [...]}
+    # Each found item is keyed by "desig site" and contains observations with
+    # "status_decoded" fields that match the string-mode response format.
+    set result_map [dict create]
+
+    # Extract status_decoded lines for each found designation
+    foreach d $desig_list {
+	set query_key "$d $site"
+	set key_pat "\"$query_key\":"
+	set ki [string first $key_pat $raw_json]
+
+	if {$ki >= 0} {
+	    # Collect all status_decoded values for this designation
+	    # They appear as: "status_decoded": "...line..."
+	    set decoded_lines {}
+	    set search_start $ki
+	    # Find the end of this designation's array (next key or end of found)
+	    set next_key -1
+	    foreach other_d $desig_list {
+		if {$other_d eq $d} { continue }
+		set other_key "\"$other_d $site\":"
+		set oi [string first $other_key $raw_json [expr {$ki + 1}]]
+		if {$oi > 0 && ($next_key < 0 || $oi < $next_key)} {
+		    set next_key $oi
+		}
+	    }
+	    if {$next_key < 0} { set next_key [string length $raw_json] }
+
+	    set block [string range $raw_json $ki [expr {$next_key - 1}]]
+	    set sd_key "\"status_decoded\": \""
+	    set pos 0
+	    while {1} {
+		set si [string first $sd_key $block $pos]
+		if {$si < 0} { break }
+		set vi [expr {$si + [string length $sd_key]}]
+		# Find closing quote — handle escaped quotes
+		set vj $vi
+		while {$vj < [string length $block]} {
+		    if {[string index $block $vj] eq "\"" && [string index $block [expr {$vj - 1}]] ne "\\"} {
+			break
+		    }
+		    incr vj
+		}
+		set decoded [string range $block $vi [expr {$vj - 1}]]
+		# Unescape JSON string
+		set decoded [string map {\\\" \" \\\\ \\ \\n \n \\t \t} $decoded]
+		lappend decoded_lines $decoded
+		set pos [expr {$vj + 1}]
+	    }
+	    if {[llength $decoded_lines] > 0} {
+		dict set result_map $d [join $decoded_lines "\n"]
+	    }
+	}
+
+	# Check not_found list
+	if {![dict exists $result_map $d]} {
+	    set nf_pat "\"$query_key\""
+	    if {[string first $nf_pat $raw_json] >= 0} {
+		# Check if it's in the not_found section
+		set nf_section [string first "\"not_found\"" $raw_json]
+		if {$nf_section >= 0} {
+		    set nf_block [string range $raw_json $nf_section end]
+		    if {[string first $nf_pat $nf_block] >= 0} {
+			dict set result_map $d [format {"%s" was not found after attempting a search.} $query_key]
+		    }
+		}
+	    }
+	}
+    }
+
+    return $result_map
+}
+
+# Query JPL Scout for NEOCP object details. Returns formatted string or "".
+proc scout_query { desig } {
+    set opts [curl_opts]
+    set cmd [format "curl %s -k \"https://ssd-api.jpl.nasa.gov/scout.api?tdes=%s\" 2> /dev/null" $opts $desig]
+
+    catch { RunCommand $cmd } raw
+    if {[string length [string trim $raw]] == 0} { return "" }
+
+    # Minimal JSON parsing — extract key fields by string search
+    # (avoids Tcl json package dependency and regex bracket issues)
+    set fields {nObs arc Vmag H moid rate phaScore neoScore rating geocentricScore caDist}
+    foreach f $fields { set v($f) "" }
+
+    foreach f $fields {
+	set key "\"$f\":"
+	set ki [string first $key $raw]
+	if {$ki < 0} { continue }
+	set vi [expr {$ki + [string length $key]}]
+	# Skip whitespace
+	while {[string index $raw $vi] eq " "} { incr vi }
+	# Read value — may be quoted string, number, or null
+	if {[string index $raw $vi] eq "\""} {
+	    incr vi
+	    set vj [string first "\"" $raw $vi]
+	    if {$vj > $vi} { set v($f) [string range $raw $vi [expr {$vj - 1}]] }
+	} elseif {[string range $raw $vi [expr {$vi + 3}]] eq "null"} {
+	    set v($f) ""
+	} else {
+	    # Number — read until comma, brace, or whitespace
+	    set vj $vi
+	    while {$vj < [string length $raw]} {
+		set ch [string index $raw $vj]
+		if {$ch eq "," || $ch eq "\}" || $ch eq " "} { break }
+		incr vj
+	    }
+	    set v($f) [string range $raw $vi [expr {$vj - 1}]]
+	}
+    }
+
+    # If we got an error response or no nObs, Scout doesn't know this object
+    if {$v(nObs) eq "" || [string first "error" $raw] >= 0} { return [list "none" ""] }
+
+    # Determine alert level:
+    #   - impact rating non-zero
+    #   - PHA score == 100
+    #   - close approach < 7 Earth radii (7 ER ≈ 0.1161 LD)
+    set is_alert 0
+    if {$v(rating) ne "" && $v(rating) != 0} { set is_alert 1 }
+    if {$v(phaScore) ne "" && $v(phaScore) == 100} { set is_alert 1 }
+    set ca_er ""
+    if {$v(caDist) ne ""} {
+	set ca_er [format "%.1f" [expr {$v(caDist) * 60.27}]]
+	if {$v(caDist) * 60.27 < 7.0} { set is_alert 1 }
+    }
+
+    # Line 1: impact/scores/close-approach
+    set line1_parts {}
+    if {$v(rating) ne ""} {
+	lappend line1_parts [format "Imp %s" $v(rating)]
+    }
+    if {$v(caDist) ne ""} {
+	if {$v(caDist) * 60.27 < 7.0} {
+	    lappend line1_parts [format "CA %sER" $ca_er]
+	} else {
+	    lappend line1_parts [format "CA %sLD" $v(caDist)]
+	}
+    }
+    if {$v(neoScore) ne ""} {
+	lappend line1_parts [format "NEO %s%%" $v(neoScore)]
+    }
+    if {$v(phaScore) ne "" && $v(phaScore) > 0} {
+	lappend line1_parts [format "PHA %s%%" $v(phaScore)]
+    }
+    if {$v(geocentricScore) ne "" && $v(geocentricScore) > 0} {
+	lappend line1_parts [format "GEO %s%%" $v(geocentricScore)]
+    }
+
+    # Line 2: observational details
+    set line2_parts {}
+    if {$v(nObs) ne ""}     { lappend line2_parts [format "%sobs" $v(nObs)] }
+    if {$v(arc) ne ""}      { lappend line2_parts [format "%sd arc" $v(arc)] }
+    if {$v(Vmag) ne ""}     { lappend line2_parts [format "V=%s" $v(Vmag)] }
+    if {$v(H) ne ""}        { lappend line2_parts [format "H=%s" $v(H)] }
+    if {$v(moid) ne ""}     { lappend line2_parts [format "moid=%sau" $v(moid)] }
+    if {$v(rate) ne ""}     { lappend line2_parts [format "rate=%s\"/hr" $v(rate)] }
+
+    if {[llength $line1_parts] == 0 && [llength $line2_parts] == 0} {
+	return [list "none" ""]
+    }
+
+    set text ""
+    if {[llength $line1_parts] > 0} {
+	append text [format "    Scout: %s" [join $line1_parts " "]]
+    }
+    if {[llength $line2_parts] > 0} {
+	if {$text ne ""} { append text "\n" }
+	append text [format "           %s" [join $line2_parts " "]]
+    }
+    return [list [expr {$is_alert ? "alert" : "info"}] $text]
+}
+
+proc print_usage {} {
+
+  puts " "
+  puts "  wamo: query MPC's WAMO service (https://minorplanetcenter.net/beta/wamo.html)"
+  puts " "
+  puts "        usage: wamo \[-v\] \[-q\] \[-s site\] \[-u UT date\] desigs or -l <file>"
+  puts "               wamo \[--batch\] \[--timeout N\] \[--keepalive\]"
+  puts " "
+  puts "               if no argument, designations are read from neos files in the current directory"
+  puts "               quote UT dates like \"YYYY MM DD\""
+  puts " "
+  puts "               --nobatch     query one designation at a time (streaming output)"
+  puts "               --timeout N   curl connect timeout in seconds (default 15)"
+  puts "               --keepalive   enable HTTP keepalive for sequential queries"
+  puts "               --scout       show JPL Scout data for all NEOCP objects"
+  puts "               --noscout     suppress all Scout lookups"
+  puts "               (default: batch mode, Scout alerts for impact/PHA/close approach)"
+  puts " "
+
+  exit -1
+}
+
+proc whazzit { instr } {
+
+    if {[string equal $instr "verified"] }         { return "mixed observations, to be split and assigned to appropriate queues" }
+    if {[string equal $instr "neo/new/incoming"] } { return "new NEOCP or PCCP objects" }
+    if {[string equal $instr "neocp/incoming"] }   { return "NEOCP or PCCP followup" }
+    if {[string equal $instr "neo/mopp"] }         { return "unnumbered NEOs" }
+    if {[string equal $instr "neo/num"] }          { return "numbered NEOs" }
+    if {[string equal $instr "neo/newid"] }        { return "NEO (p)recoveries" }
+    if {[string equal $instr "mba/itf"] }          { return "unidentified tracklets heading to the Isolated Tracklet File (ITF)" }
+    if {[string equal $instr "mba/mopp"] }         { return "unnumbered MBAs" }
+    if {[string equal $instr "mba/num"] }          { return "numbered MBAs" }
+    if {[string equal $instr "mba/new"] }          { return "possible new MBAs to be designated" }
+    if {[string equal $instr "newcode"] }          { return "observations awaiting a program code to be assigned" }
+    if {[string equal $instr "tno/unn"] }          { return "unnumbered one-opposition TNOs" }
+    if {[string equal $instr "tno/mopp"] }         { return "unnumbered multi-opposition TNOs" }
+    if {[string equal $instr "tno/num"] }          { return "numbered TNOs" }
+    if {[string equal $instr "tno/newid"] }         { return "TNO (p)recoveries" }
+    if {[string equal $instr "tno/new"] }          { return "possible new TNOs to be designated" }
+    if {[string equal $instr "sat/unn"] }          { return "unnumbered natural satellites" }
+    if {[string equal $instr "sat/num"] }          { return "numbered natural satellites" }
+    if {[string equal $instr "sat/new"] }          { return "possible new natural satellites to be designated" }
+    if {[string equal $instr "cmt/cmt"] }          { return "unnumbered comets" }
+    if {[string equal $instr "cmt/pct"] }          { return "numbered comets" }
+    if {[string equal $instr "cmt/new"] }          { return "possible new comets (but not on PCCP -- e.g. SOHO or archival data)" }
+
+    # not on the help page (yet)
+    if {[string equal $instr "artsat"] }          { return "artsat processing queue" }
+    if {[string equal $instr "sat/art"] }         { return "artificial satellite processing queue" }
+    if {[string equal $instr "sat"] }             { return "natural satellite processing queue" }
+    if {[string equal $instr "problems"] }        { return "flagged for manual review" }
+
+    return "unrecognized, try wamo -v and see https://minorplanetcenter.net/beta/help.html"
+}
+
+proc trackstat { desig mpcstat } {
+    global utdate mpec permID provID notfound
+    global unprocessed pending published
+    global neocp notminor itf rejected deleted queued
+    global artificial
+    global other_dates
+
+    for {set idx 1} {$idx < 10} {incr idx} {
+	set obsdate($idx)    "NONE"
+
+	set col80($idx)      "NONE"
+	set mess($idx)       "NONE"
+
+	set qname "unknown"
+
+	set ar_mpec($idx)    "NONE"
+	set ar_permID($idx)  "NONE"
+	set ar_provID($idx)  "NONE"
+
+	set ar_unprocessed($idx) 0
+	set ar_neocp($idx)       0
+	set ar_pending($idx)     0
+	set ar_published($idx)   0
+	set ar_notminor($idx)    0
+	set ar_itf($idx)         0
+	set ar_rejected($idx)    0
+	set ar_deleted($idx)     0
+	set ar_queued($idx)      0
+	set ar_artificial($idx)  0
+
+	set ar_notfound($idx)    0
+    }
+
+    set lines [split $mpcstat "\n"]
+
+    # trkSub-format responses lack obs80 columns and dates;
+    # count them separately before the obs80 parsing loop
+    set trksub_notminor    0
+    set trksub_deleted     0
+    set trksub_artificial  0
+    set trksub_rejected    0
+    set trksub_duplicate   0
+    set trksub_unprocessed 0
+    set trksub_queued      0
+    set trksub_unknown     0
+    set trksub_count       0
+
+    # Track whether MPC sent an explicit "not found" vs no response at all
+    set mpc_not_found 0
+    set mpc_invalid   0
+
+    set nobs 0
+    set idx 1
+    foreach line $lines {
+	if {[string length $line] <= 0} { break }
+
+	# Handle explicit MPC "not found" or "invalid identifier" responses
+	if {[string first "was not found after attempting a search" $line] >= 0} {
+	    set mpc_not_found 1
+	    continue
+	}
+	if {[string first "was not identified as a valid" $line] >= 0} {
+	    set mpc_invalid 1
+	    continue
+	}
+
+	# Handle trkSub-format lines: "The trkSub 'XXX YYY' (obsid) status."
+	if {[string first "The trkSub" $line] >= 0} {
+	    incr trksub_count
+	    set trksub_matched 0
+	    if {[string first "not a minor planet" $line] >= 0}      { incr trksub_notminor; set trksub_matched 1 }
+	    if {[string first "deleted" $line] >= 0}                  { incr trksub_deleted; set trksub_matched 1 }
+	    if {[string first "artificial" $line] >= 0}               { incr trksub_artificial; set trksub_matched 1 }
+	    if {[string first "rejected" $line] >= 0}                 { incr trksub_rejected; set trksub_matched 1 }
+	    if {[string first "duplicate" $line] >= 0}                { incr trksub_duplicate; set trksub_matched 1 }
+	    if {[string first "not been processed" $line] >= 0}      { incr trksub_unprocessed; set trksub_matched 1 }
+	    if {[string first "processing queue" $line] >= 0} {
+		incr trksub_queued; set trksub_matched 1
+		# extract queue name from: is in the 'queue/name' processing queue.
+		set qi [string first "'" $line 30]
+		if {$qi >= 0} {
+		    set qj [string first "'" $line [expr {$qi + 1}]]
+		    if {$qj > $qi} {
+			set qname [string range $line [expr {$qi + 1}] [expr {$qj - 1}]]
+			set qdetails [whazzit $qname]
+		    }
+		}
+	    }
+	    if {!$trksub_matched}                                     { incr trksub_unknown }
+	    continue
+	}
+
+	set obsdate($idx) [string range $line 15 24]
+	if {$obsdate($idx) != $utdate} {
+	    # Collect other dates for multi-night annotation
+	    if {![info exists seen_dates($obsdate($idx))]} {
+		set seen_dates($obsdate($idx)) 1
+	    }
+	    continue
+	}
+
+	set col80($idx) [string range $line 0 79]
+	    # set mess($idx)  [string range $line 81 end]
+	    # set tmpstr [string map [list "\'" {} ] $mess($idx)]
+	    # puts $mess($idx)
+	    # puts $tmpstr
+
+	set mess($idx) [string map [list "\'" {} ] [string range $line 81 end] ]
+
+	    # puts $line
+	    # puts $mess($idx)
+
+	if {[string first "processed" $mess($idx)] > 0} { incr ar_unprocessed($idx) }
+	if {[string first "NEOCP" $mess($idx)] > 0}     { incr ar_neocp($idx) }
+	if {[string first "pending" $mess($idx)] > 0}   { incr ar_pending($idx) }
+	if {[string first "published" $mess($idx)] > 0} { incr ar_published($idx) }
+	if {[string first "minor" $mess($idx)] > 0}     { incr ar_notminor($idx) }
+	if {[string first "ITF" $mess($idx)] > 0}       { incr ar_itf($idx) }
+	if {[string first "rejected" $mess($idx)] > 0}  { incr ar_rejected($idx) }
+	if {[string first "deleted" $mess($idx)] > 0}   { incr ar_deleted($idx) }
+	if {[string first "artificial" $mess($idx)] > 0} { incr ar_artificial($idx) }
+	if {[string first "not found" $line] > 0}       { incr ar_notfound($idx) }
+
+	if {[string first "queue" $mess($idx)] > 0}     {
+
+	    incr ar_queued($idx)
+
+		# puts $mess($idx)
+
+	    set idx_before [expr ([string first "the" $mess($idx)] + 4)]
+	    set idx_after  [expr ([string first "processing" $mess($idx)] - 2)]
+	    if {$idx_before >= 0 && $idx_after > $idx_before} {
+		set qname [string range $mess($idx) $idx_before $idx_after]
+		set qdetails [whazzit $qname]
+		    # puts $qname
+	    }
+	}
+
+	set midx [string first "MPEC" $line]
+	if {$midx > 0} {
+	    set tmpstr [string range $line $midx end]
+	    set pidx [string first "." $tmpstr]
+	    set ar_mpec($idx) [string range $tmpstr 0 $pidx-1]
+	}
+
+	set iidx [string first "identified" $line]
+	if {$iidx > 0} {
+	    set tmpstr [string range $line $iidx end]
+
+	    set cidx [string first "," $tmpstr]
+
+	    if {$cidx > 0} {
+		set ar_provID($idx) [string range $tmpstr 14 $cidx-1]
+
+	    } else {
+		set aidx [string first "and" $tmpstr]
+
+		if {$aidx > 0} {
+		    set ar_provID($idx) [string range $tmpstr 14 $aidx-2]
+		}
+	    }
+	}
+
+	set nobs $idx
+	incr idx
+    }
+
+    set mpec    "NONE"
+    set permID  "NONE"
+    set provID  "NONE"
+
+    set unprocessed 0
+    set neocp       0
+    set pending     0
+    set published   0
+    set notminor    0
+    set itf         0
+    set rejected    0
+    set deleted     0
+    set notfound    0
+    set queued      0
+    set artificial  0
+
+    for {set idx 1} {$idx < 10} {incr idx} {
+	if {$col80($idx) == "NONE" || $mess($idx) == "NONE"} {break}
+	# puts [format "%d: %s %10s %s" $idx $desig $obsdate($idx) $mess($idx)]
+
+	# obsdate test
+
+	if {$ar_unprocessed($idx)} {set unprocessed 1}
+	if {$ar_neocp($idx)}       {set neocp 1}
+	if {$ar_pending($idx)}     {set pending 1}
+	if {$ar_published($idx)}   {set published 1}
+	if {$ar_notminor($idx)}    {set notminor 1}
+	if {$ar_itf($idx)}         {set itf 1}
+	if {$ar_rejected($idx)}    {incr rejected}
+	if {$ar_deleted($idx)}     {incr deleted}
+	if {$ar_artificial($idx)}  {set artificial 1}
+	if {$ar_notfound($idx)}    {set notfound 1}
+	if {$ar_queued($idx)}      {set queued 1}
+
+	if {$ar_mpec($idx) != "NONE"}   {set mpec $ar_mpec($idx)}
+	if {$ar_provID($idx) != "NONE"} {set provID $ar_provID($idx)}
+    }
+
+    # Fold trkSub-format results into the status flags
+    if {$trksub_notminor > 0}   {set notminor 1}
+    if {$trksub_deleted > 0}    {incr deleted $trksub_deleted}
+    if {$trksub_artificial > 0} {set artificial 1}
+    if {$trksub_rejected > 0}   {incr rejected $trksub_rejected}
+    if {$trksub_queued > 0}     {set queued 1}
+    if {$trksub_duplicate > 0} {set duplicate 1} else {set duplicate 0}
+    if {$trksub_unprocessed > 0} {set unprocessed 1}
+    # trkSub lines count toward nobs for deleted-tracklet logic
+    if {$trksub_count > 0 && $nobs == 0} {set nobs $trksub_count}
+
+    # Collect other observation dates (not the target night)
+    if {[array exists seen_dates]} {
+	set other_dates [lsort [array names seen_dates]]
+    } else {
+	set other_dates {}
+    }
+
+    # need to figure out how best to handle deleted
+    set multi [expr ($unprocessed + $neocp + $queued + $pending + $published + $notminor + $itf + $artificial + $duplicate + $notfound)]
+    set some  [expr ($multi + $rejected)]
+
+    # Did MPC actually respond with content that we failed to classify?
+    set got_response [expr {$trksub_count > 0 || $nobs > 0}]
+    set got_unknown  [expr {$trksub_unknown > 0}]
+
+    if {$multi > 1} {
+        return "has multiple tracklets?"
+    } elseif {$deleted == $nobs && $nobs > 0} {
+        return "was deleted"
+    } elseif {$some == 0 && ($got_response || $got_unknown)} {
+        return "has unrecognized MPC status (see log)"
+    } elseif {$mpc_invalid} {
+        return "is not a valid identifier"
+    } elseif {$mpc_not_found} {
+        return "was not found by MPC"
+    } elseif {$some == 0} {
+        return "no MPC response"
+    } elseif {$multi == 0 && $rejected > 1} {
+        return "has been rejected"
+    } elseif {$unprocessed} {
+        return "has been received, but not processed"
+    } elseif {$neocp} {
+        return "is on the NEOCP"
+    } elseif {$pending} {
+        return "is pending publication"
+    } elseif {$published} {
+        return "was published"
+    } elseif {$notminor} {
+        return "is not a minor planet"
+    } elseif {$artificial} {
+        return "was suspected to be artificial"
+    } elseif {$duplicate} {
+        return "was flagged as a near-duplicate"
+    } elseif {$itf} {
+        return "is in the ITF"
+    } elseif {$queued} {
+        return [format "has been queued to %s (%s)" $qname $qdetails]
+    } elseif {$notfound} {
+        return "has not been found"
+    }
+
+    return "internal error"
+}
+
+proc baddate { date10 } {
+    if {[string length $date10] != 10} {
+	return 1
+    }
+
+    set yyyy [string range $date10 0 3]
+    set sp1  [string range $date10 4 4]
+    set mm   [string range $date10 5 6]
+    set sp2  [string range $date10 7 7]
+    set dd   [string range $date10 8 9]
+
+    scan $yyyy "%d" year
+    scan $mm   "%d" month
+    scan $dd   "%d" day
+
+	# puts [format "%4s >%s< %2s >%s< %2s" $yyyy $sp1 $mm $sp2 $dd]
+	# puts [format "%4d %2d %2d" $year $month $day]
+
+    # somebody else's problem in the 22nd century
+    if {$year < 1801 || $year > 2100} {
+	return 2
+    } elseif {$month < 1 || $month > 12} {
+	return 3
+    } elseif {$day < 1 || $day > 31} {
+	return 4
+    } elseif {$sp1 != " " || $sp2 != " "} {
+	return 5
+    }
+
+    return 0
+}
+
+proc getsite { } {
+    set site "NONE"
+
+    if { [info exists ::env(SITECODE)] } {
+ 	set site [string range $::env(SITECODE) 0 2]
+    }
+
+    # should check against enumerated list, but we want to allow for non-CSS sites
+
+    return $site
+}
+
+proc GetMPCDate { dir } {
+# returns a date string of the format "YYYY MM DD",
+# given a directory of the format */04Jul16
+# return "ERR" if string fails simple tests
+
+    set fmterr 0
+    set yr ""
+    set mo ""
+    set dy ""
+    set day ""
+
+    # chop off everything but the tail:
+    set dir [ file tail $dir ]
+
+    # parse out the year, month and day:
+    scan $dir "%2s%3s%2s" yr mo day
+
+    # should key on length of specific months
+    set dy [string trimleft $day "0"]
+    if {$dy < 1 || $dy > 31} {
+        incr fmterr
+    }
+
+    append year "20" $yr
+
+    # Y2100 bug, CSS ops started ~2004
+    if {$year < 2001 || $year > 2099} {
+        incr fmterr
+    }
+
+    switch $mo {
+        "Jan" { set month 01 }
+        "Feb" { set month 02 }
+        "Mar" { set month 03 }
+        "Apr" { set month 04 }
+        "May" { set month 05 }
+        "Jun" { set month 06 }
+        "Jul" { set month 07 }
+        "Aug" { set month 08 }
+        "Sep" { set month 09 }
+        "Oct" { set month 10 }
+        "Nov" { set month 11 }
+        "Dec" { set month 12 }
+        default {
+            # puts "  Invalid month '$mo' in directory '$dir'"
+            incr fmterr
+        }
+    }
+
+    set datestring {}
+
+    if {$fmterr} {
+        return "ERR"
+    } else {
+        append datestring [format "%4s %2s %2s" $year $month $day]
+        return $datestring
+    }
+}
+
+# Compute tonight's data directory name (YYMmmDD format).
+# CSS is UTC-7; observing night rolls over at ~10am local = 17:00 UT.
+# We use current_time + 7 hours (formatted as UT) to get the correct date.
+proc GetTonightDir {} {
+    set tonight [expr {[clock seconds] + 25200}]
+    set yr [clock format $tonight -format "%y" -gmt 1]
+    set mo [clock format $tonight -format "%b" -gmt 1]
+    set dy [clock format $tonight -format "%d" -gmt 1]
+    return [format "%s%s%s" $yr $mo $dy]
+}
+
+# ---------------------------------------------------------------------------
+# Logging — silent JSONL log of raw WAMO responses for post-hoc analysis.
+# Default: ~/.wamo/wamo-SITE-YYYYMMDD.log  Override: WAMO_LOG env var (full path)
+# ---------------------------------------------------------------------------
+
+# Escape a string for embedding in JSON
+proc json_escape { s } {
+    set s [string map [list \\ \\\\ \" \\\" \n \\n \r \\r \t \\t] $s]
+    return $s
+}
+
+# Initialize logging; returns log file descriptor or "" if disabled/failed.
+# All warnings go to stderr so they don't pollute stdout.
+proc log_init { site } {
+    global log_fd log_path
+
+    set log_fd ""
+    set log_path ""
+    set today [clock format [clock seconds] -format "%Y%m%d" -gmt 1]
+
+    # Determine log directory and file
+    if {[info exists ::env(WAMO_LOG)]} {
+	set log_path $::env(WAMO_LOG)
+	# If WAMO_LOG is empty, logging is disabled
+	if {$log_path eq ""} { return }
+	set logdir [file dirname $log_path]
+    } else {
+	set logdir [file join $::env(HOME) ".wamo"]
+	set log_path [file join $logdir "wamo-${site}-${today}.log"]
+    }
+
+    # Create directory if needed, with user confirmation
+    if {![file isdirectory $logdir]} {
+	puts stderr "wamo: log directory $logdir does not exist."
+	puts -nonewline stderr "  Create it? \[y/N\] "
+	flush stderr
+	if {[catch {gets stdin answer}] || ![string match -nocase "y*" $answer]} {
+	    puts stderr "  logging disabled for this session"
+	    set log_path ""
+	    return
+	}
+	if {[catch {file mkdir $logdir} err]} {
+	    puts stderr "  warning: could not create $logdir: $err"
+	    set log_path ""
+	    return
+	}
+    }
+
+    # Gzip log files from prior days (ignore errors silently)
+    # Protect all of today's logs, not just this site's
+    set today_suffix "-${today}.log"
+    catch {
+	foreach old [glob -nocomplain -directory $logdir "wamo-*-*.log"] {
+	    if {![string match "*${today_suffix}" $old]} {
+		catch { exec gzip -q $old }
+	    }
+	}
+    }
+
+    # Check total size of log directory; warn above 100 MB
+    catch {
+	set total 0
+	foreach f [glob -nocomplain -directory $logdir *] {
+	    catch { incr total [file size $f] }
+	}
+	if {$total > 104857600} {
+	    set mb [expr {$total / 1048576}]
+	    puts stderr [format "wamo: warning: log directory %s is using %d MB" $logdir $mb]
+	}
+    }
+
+    # Open log file for appending
+    if {[catch {set log_fd [open $log_path a]} err]} {
+	puts stderr "wamo: warning: could not open log: $err"
+	set log_fd ""
+	set log_path ""
+    }
+}
+
+# Write one JSONL record per designation query
+proc log_query { desig site utdate raw_response parsed_status } {
+    global log_fd log_flags
+
+    if {$log_fd eq ""} { return }
+
+    set ts [clock format [clock seconds] -format "%Y-%m-%dT%H:%M:%SZ" -gmt 1]
+    set cwd [pwd]
+
+    # Flag actionable issues for easy filtering: grep '"matched":false'
+    # "no MPC response" = network/curl failure; "unrecognized" = new status type
+    if {[string first "unrecognized" $parsed_status] >= 0 || [string first "no MPC response" $parsed_status] >= 0} {
+	set matched "false"
+    } else {
+	set matched "true"
+    }
+
+    # Build JSONL record manually (no json package in base Tcl)
+    set rec [format {{"ts":"%s","desig":"%s","site":"%s","utdate":"%s","cwd":"%s","status":"%s","matched":%s,%s"raw":"%s"}} \
+	[json_escape $ts] \
+	[json_escape $desig] \
+	[json_escape $site] \
+	[json_escape $utdate] \
+	[json_escape $cwd] \
+	[json_escape $parsed_status] \
+	$matched \
+	$log_flags \
+	[json_escape $raw_response]]
+
+    catch {
+	puts $log_fd $rec
+	flush $log_fd
+    }
+}
+
+# Close the log file
+proc log_close {} {
+    global log_fd
+    if {$log_fd ne ""} {
+	catch { close $log_fd }
+    }
+}
+
+# Main main
+
+# if {$argc < 1} { print_usage }
+
+    # set hn [info hostname]
+    # set dot [string first "." $hn]
+    # set shorthn [string range $hn 0 $dot-1]
+
+set site [getsite]
+
+# GMT may not mean UTC to TCL, but rather British time
+set utdate [clock format [clock seconds] -format "%Y %m %d" -gmt 1]
+
+set idx -1; set quiet 0; set verbose 0; set founddir 0
+set sflag 0; set lflag 0; set infil "NONE"; set uflag 0
+set mpcd 0; set gotsite 0; set tflag 0
+
+foreach val $argv {
+    incr idx
+    if {$sflag} {
+        set site $val; set sflag 0; set gotsite 1
+    } elseif {$lflag} {
+        set infil $val; set lflag 0
+    } elseif {$uflag} {
+        set utdate $val; set uflag 0
+    } elseif {$tflag} {
+        set curl_timeout $val; set tflag 0
+    } elseif {$val == "-s"} {
+        set sflag 1
+    } elseif {$val == "-l"} {
+        set lflag 1
+    } elseif {$val == "-u"} {
+        set uflag 1
+    } elseif {$val == "-m"} {
+        set mpcd 1
+    } elseif {$val == "-q"} {
+        set quiet 1
+    } elseif {$val == "-v"} {
+        set verbose 1
+    } elseif {$val == "--batch"} {
+        set batch_mode 1
+    } elseif {$val == "--nobatch"} {
+        set batch_mode 0
+    } elseif {$val == "--timeout"} {
+        set tflag 1
+    } elseif {$val == "--keepalive"} {
+        set curl_keepalive 1
+    } elseif {$val == "--scout"} {
+        set scout_mode "all"
+    } elseif {$val == "--noscout"} {
+        set scout_mode "none"
+    } else {
+        set founddir 1
+	break
+    }
+}
+
+# should capture time-obs and sort
+if {!$founddir && $infil == "NONE"} {
+    if {$mpcd} {
+	set filelist "*.mpcd"
+    } else {
+	set filelist "*.neos"
+    }
+
+    # Auto-detect working directory:
+    # 1. If CWD has the needed files, use it
+    # 2. Otherwise try /data0/YYMmmDD (tonight's UT date for CSS timezone)
+    # 3. Otherwise print usage
+    set datadir [pwd]
+    if {[llength [glob -nocomplain $filelist]] == 0} {
+	set tonight [GetTonightDir]
+	set trydir [file join "/data0" $tonight]
+	if {[file isdirectory $trydir] && [llength [glob -nocomplain -directory $trydir $filelist]] > 0} {
+	    set datadir $trydir
+	    cd $datadir
+	    if {! $quiet} { puts stderr [format "using %s" $datadir] }
+	} else {
+	    puts stderr [format "no %s files in current directory or %s" $filelist $trydir]
+	    print_usage
+	}
+    }
+
+    if {$mpcd} {
+	if {! $quiet} { puts stderr "sampling targets from `*.mpcd' files in current directory" }
+    } else {
+	if {! $quiet} { puts stderr "reading targets from `*.neos' files in current directory" }
+    }
+
+    set sites { G96 E12 I52 V06 V00 703 G84 }
+    set site "NONE"
+
+    set cmdfmt {cat %s | grep -v %sx | sed -e "s/.\*\ I52//" -e "s/.\*\ 703//" -e "s/.\*\ G96//" -e "s/.\*\ V06//" -e "s/.\*\ V00//" -e "s/.\*\ E12//" -e "s/.\*\ G84//" | sort | uniq}
+
+    set tmplist {}
+
+    set workdir [file tail [pwd]]
+    set utdate [GetMPCDate $workdir]
+
+    # Track observation type per designation: survey (N/S) vs followup (F/U)
+    # desig_obscount(DESIG,survey) and desig_obscount(DESIG,followup) hold counts
+    global desig_obscount
+
+    # loop over neos (or mpcd) files
+    foreach neos [ glob -nocomplain $filelist ] {
+	# maybe wants to be first file in list?
+	if {! $gotsite} {
+	    set tmpsite [string range $neos 0 2]
+	    if {[lsearch $sites $tmpsite] >= 0} {
+		set site $tmpsite;
+		incr gotsite
+	    } else {
+		# try reading the file, should do this in TCL
+		set cmd [format "cat %s | head -1" $neos]
+		catch { RunCommand $cmd } result
+
+		set tmpsite [string range $result 77 79]
+		if {[lsearch $sites $tmpsite] >= 0} { set site $tmpsite; incr gotsite }
+	    }
+	}
+
+	# Extract field prefix from filename: TEL_DATE_BIN_Xnnnnn_REP_SEQ.ext
+	# The 4th underscore-delimited component's first char is N/S/F/U
+	set fname_parts [split [file tail $neos] "_"]
+	if {[llength $fname_parts] >= 4} {
+	    set field_prefix [string index [lindex $fname_parts 3] 0]
+	} else {
+	    set field_prefix ""
+	}
+	if {$field_prefix eq "F" || $field_prefix eq "U"} {
+	    set this_type "followup"
+	} else {
+	    set this_type "survey"
+	}
+
+	catch { RunCommand [format $cmdfmt $neos $site] } result
+	set result2 [string map -nocase {{*} { }} [join $result]]
+
+	# 2 blanks, 7 char ID, asterisk
+	# if {[string length $result] <= 9 || [string range $result 8 8] == "\ "}
+
+	# handling for short IDs (5 or 6 characters)
+	if {[string range $result 9 9] == "\ " || [string range $result 8 8] == "\ " || [string range $result 7 7] == "\ " || [string range $result 6 6] == "\ "} {
+	    puts [format "  unreported observations in %s" $neos]
+	}
+
+        # support for 2 and 3 NEOs per neos file
+        # perhaps rewrite the entire neos parsing
+	# lappend tmplist [string range $result 2 8]
+        # if {[string length $result] == 21} { lappend tmplist [string range $result 13 19] }
+        # if {[string length $result] == 32} { lappend tmplist [string range $result 24 30] }
+
+	# Record obstype counts for each designation found in this file
+	foreach d [split $result2] {
+	    set d [string trim $d]
+	    if {$d eq ""} { continue }
+	    if {![info exists desig_obscount($d,survey)]} {
+		set desig_obscount($d,survey) 0
+		set desig_obscount($d,followup) 0
+	    }
+	    if {$this_type eq "survey"} {
+		incr desig_obscount($d,survey)
+	    } else {
+		incr desig_obscount($d,followup)
+	    }
+	}
+
+	lappend tmplist [join $result2]
+    }
+
+    set tmplist2 [string map -nocase {{\{} { } {\}} { }} [split $tmplist]]
+
+    if {$mpcd} {
+	# Deduplicate, then sample up to 10 at random
+	set unique_desigs [lsort -dictionary -unique $tmplist2]
+	set nuniq [llength $unique_desigs]
+	set nsample [expr {min(10, $nuniq)}]
+	if {! $quiet} { puts stderr [format "sampling %d of %d unique designations" $nsample $nuniq] }
+
+	if {$nsample == $nuniq} {
+	    set clargs $unique_desigs
+	} else {
+	    # Fisher-Yates partial shuffle to pick nsample without replacement
+	    set pool $unique_desigs
+	    set clargs {}
+	    for {set idx 0} {$idx < $nsample} {incr idx} {
+		set remaining [expr {$nuniq - $idx}]
+		set nn [expr {int(rand() * $remaining)}]
+		lappend clargs [lindex $pool $nn]
+		# Swap picked element to the end
+		set pool [lreplace $pool $nn $nn [lindex $pool [expr {$remaining - 1}]]]
+	    }
+	    set clargs [lsort -dictionary $clargs]
+	}
+    } else {
+	# Deduplicate: each designation queried once, sorted
+	set clargs [lsort -dictionary -unique $tmplist2]
+    }
+}
+
+if {$site == "NONE"} {puts "no site specified\n"; print_usage; exit }
+
+if {[baddate $utdate]} {
+    # puts "bad date $utdate\n";
+    print_usage;
+    exit
+}
+
+if {! $quiet} { puts "\nfor $site, $utdate\n" }
+
+# Capture active flags for log records
+set log_flags [format {"batch":%s,"timeout":%d,"keepalive":%s,"scout":"%s",} \
+    [expr {$batch_mode ? "true" : "false"}] \
+    $curl_timeout \
+    [expr {$curl_keepalive ? "true" : "false"}] \
+    $scout_mode]
+
+log_init $site
+
+if {$infil != "NONE"} {
+    if {[catch {set fd [open $infil "r"]} result]} {
+	puts $result
+	exit 1
+    }
+
+    set clargs {}
+    while {[gets $fd desig] >= 0} { lappend clargs $desig }
+
+    close $fd
+
+} elseif {$founddir} {
+    set clargs [lrange $argv $idx end]
+    # set nclargs [llength $clargs]
+}
+
+set ndesigs 0
+
+# Format and print one designation's result
+proc print_result { desig result status verbose } {
+    global mpec provID rejected other_dates
+    global unprocessed neocp queued pending published notminor artificial itf deleted notfound
+    global desig_obscount scout_mode
+
+    if {$verbose} {
+	puts "-----"
+	puts $result
+	puts [format "%7s unp=%d neocp=%d que=%d pend=%d pub=%d notminor=%d artif=%d itf=%d rej=%d del=%d notfound=%d" $desig $unprocessed $neocp $queued $pending $published $notminor $artificial $itf $rejected $deleted $notfound]
+
+    } else {
+	# Build observation type prefix (before designation)
+	set prefix ""
+	if {[info exists desig_obscount($desig,survey)]} {
+	    set sc $desig_obscount($desig,survey)
+	    set fc $desig_obscount($desig,followup)
+	    if {$sc >= 1 && $fc >= 1}    { set prefix "s+f" }  elseif \
+	       {$sc > 1}                 { set prefix "s+s" }  elseif \
+	       {$fc > 1}                 { set prefix "f+f" }  elseif \
+	       {$sc == 1}                { set prefix "svy" }  elseif \
+	       {$fc == 1}                { set prefix "fup" }
+	}
+
+	if {$prefix ne ""} {
+	    set outstr [format "%s %s %s" $prefix $desig $status]
+	} else {
+	    set outstr [format "%s %s" $desig $status]
+	}
+
+	# maybe add deleted / rejected? Are there tracklets that are entirely deleted?
+	if {$rejected > 0} { set outstr [concat $outstr $rejected] }
+
+	# maybe adjust MPEC alignment for various cases?
+	if {$mpec != "NONE"} { set outstr [concat $outstr "in" $mpec] }
+
+	# doesn't currently distinguish between provID and permID
+	if {$provID != "NONE"} {
+	    set plen [string length $provID]
+	    set outstr [concat $outstr [format "as %s" $provID]]
+	}
+
+	# Note other observation dates if present
+	if {[llength $other_dates] > 0} {
+	    set outstr [concat $outstr [format "\[also %s\]" [join $other_dates ", "]]]
+	}
+
+	puts $outstr
+
+	# Scout lookup for NEOCP objects
+	# "all" = always show, "auto" = only show alerts, "none" = never
+	if {$scout_mode ne "none" && $neocp} {
+	    set scout_result [scout_query $desig]
+	    set scout_level [lindex $scout_result 0]
+	    set scout_text  [lindex $scout_result 1]
+	    if {$scout_text ne ""} {
+		if {$scout_mode eq "all" || $scout_level eq "alert"} {
+		    puts $scout_text
+		}
+	    }
+	}
+    }
+}
+
+if {$batch_mode && !$mpcd && [llength $clargs] > 0} {
+    # Batch mode: one API call for all designations
+    set batch_results [wamo_batch $clargs $site]
+
+    foreach desig $clargs {
+	if {[dict exists $batch_results $desig]} {
+	    set result [dict get $batch_results $desig]
+	} else {
+	    set result ""
+	}
+
+	set status [trackstat $desig $result]
+	log_query $desig $site $utdate $result $status
+	incr ndesigs
+	print_result $desig $result $status $verbose
+    }
+
+} else {
+    # Sequential mode: one API call per designation, streaming output
+    if {! $quiet} { puts stderr [format "querying %d designations..." [llength $clargs]] }
+    foreach desig $clargs {
+	set result [wamo_query $desig $site]
+	set status [trackstat $desig $result]
+	log_query $desig $site $utdate $result $status
+	incr ndesigs
+	print_result $desig $result $status $verbose
+    }
+}
+
+puts [format "\n  total = %s designations\n" $ndesigs]
+
+log_close
+exit 0

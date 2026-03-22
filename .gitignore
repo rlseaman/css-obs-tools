@@ -7,6 +7,13 @@ __pycache__/
 *~
 scratch/
 
+# Claude Code settings
+.claude/
+
 # Local working documents (not for publication)
 reports/kp21m-slew-performance-jun2023.md
 reports/convergence_trend.png
+reports/nighttime_observing_inventory.jsonl
+analysis-*.txt
+batch_err.txt
+wamo-logs/
